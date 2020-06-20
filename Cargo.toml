@@ -1,0 +1,12 @@
+[package]
+name = "hkcp"
+version = "0.1.0"
+authors = ["Giovanni Cuccu <giovanni.cuccu@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+thread_local = "1.0.1"
+parking_lot = "0.10"
+chrono = "0.4"
