@@ -1,9 +1,10 @@
 use std::cell::RefCell;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering, AtomicU8};
-use std::sync::{Arc, RwLock};
-use std::fmt;
+use std::sync::{Arc, RwLock, Mutex, Condvar};
+use std::{fmt, error};
 use thread_local::ThreadLocal;
+use std::time::Duration;
 
 #[cfg(test)]
 mod test;
@@ -128,5 +129,238 @@ impl<'a, T: Send + Sync> ConcurrentBag<T> {
         if index_opt.is_some() {
             entry_list.remove(index_opt.unwrap());
         }
+    }
+}
+
+pub struct ConnectionPoolConfig {
+    initial_connections: u16,
+    max_connections: u16,
+    connect_timeout_millis: u32,
+    get_timeout_millis: u32,
+}
+
+impl ConnectionPoolConfig {
+    pub fn new(
+        initial_connections: u16,
+        max_connections: u16,
+        connect_timeout_millis: u32,
+        get_timeout_millis: u32,
+    ) -> ConnectionPoolConfig {
+        ConnectionPoolConfig {
+            initial_connections,
+            max_connections,
+            connect_timeout_millis,
+            get_timeout_millis,
+        }
+    }
+}
+
+pub trait ConnectionFactory: Send + Sync + 'static {
+    /// The connection type this manager deals with.
+    type Connection: Send + Sync + 'static;
+
+    /// The error type returned by `Connection`s.
+    type Error: error::Error + 'static;
+
+    /// Attempts to create a new connection.
+    fn connect(&self) -> Result<Self::Connection, Self::Error>;
+}
+
+struct ConnectionPoolStatus<T: ConnectionFactory> {
+    current_connections_num: u16,
+    connection_factory: T,
+}
+
+#[derive(Debug, Clone)]
+pub struct PoolError {
+    message: String,
+}
+
+impl fmt::Display for PoolError {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        write!(fmt, "{}", self.message)
+    }
+}
+
+impl std::error::Error for PoolError {
+    fn description(&self) -> &str {
+        &self.message
+    }
+}
+
+pub struct ConnectionPool<T>
+    where
+        T: ConnectionFactory,
+{
+    bag: Arc<ConcurrentBag<T::Connection>>,
+    status: Arc<Mutex<ConnectionPoolStatus<T>>>,
+    config: Arc<ConnectionPoolConfig>,
+    condvar: Arc<Condvar>,
+}
+
+/// Returns a new `Pool` referencing the same state as `self`.
+impl<T> Clone for ConnectionPool<T>
+    where
+        T: ConnectionFactory,
+{
+    fn clone(&self) -> ConnectionPool<T> {
+        ConnectionPool {
+            bag: self.bag.clone(),
+            status: self.status.clone(),
+            config: self.config.clone(),
+            condvar: self.condvar.clone(),
+        }
+    }
+}
+
+impl<T: ConnectionFactory> ConnectionPool<T> {
+    pub fn new(connection_factory: T) -> ConnectionPool<T> {
+        ConnectionPool {
+            bag: Arc::new(ConcurrentBag::new()),
+            status: Arc::new(Mutex::new(ConnectionPoolStatus {
+                current_connections_num: 0,
+                connection_factory,
+            })),
+            config: Arc::new(ConnectionPoolConfig {
+                initial_connections: 1,
+                max_connections: 2,
+                connect_timeout_millis: 500,
+                get_timeout_millis: 500,
+            }),
+            condvar: Arc::new(Condvar::new()),
+        }
+    }
+
+    pub fn new_with_config(
+        connection_factory: T,
+        pool_config: ConnectionPoolConfig,
+    ) -> ConnectionPool<T> {
+        ConnectionPool {
+            bag: Arc::new(ConcurrentBag::new()),
+            status: Arc::new(Mutex::new(ConnectionPoolStatus {
+                current_connections_num: 0,
+                connection_factory,
+            })),
+            config: Arc::new(pool_config),
+            condvar: Arc::new(Condvar::new()),
+        }
+    }
+
+    fn release_connection(&self, entry: &BagEntry<T::Connection>) {
+        self.bag.release_entry(entry);
+        self.condvar.notify_one();
+    }
+
+    pub fn get_connection(&self) -> Result<PooledConnection<T>, PoolError> {
+        let opt_entry = self.bag.lease_entry();
+        if opt_entry.is_some() {
+            return Ok(PooledConnection::new(self.clone(), opt_entry.unwrap()));
+        }
+
+        let lock_result = self.status.lock();
+        if lock_result.is_ok() {
+            let mut status_lock = lock_result.unwrap();
+            if status_lock.current_connections_num < self.config.max_connections {
+                let conn_res = status_lock.connection_factory.connect();
+                match conn_res {
+                    Ok(conn) => {
+                        self.bag.add_entry(conn);
+                        status_lock.current_connections_num =
+                            status_lock.current_connections_num + 1;
+                        let opt_entry = self.bag.lease_entry();
+                        if opt_entry.is_some() {
+                            return Ok(PooledConnection::new(self.clone(), opt_entry.unwrap()));
+                        }
+                    }
+                    Err(err) => {
+                        return Err(PoolError {
+                            message: String::from(err.to_string()),
+                        });
+                    }
+                }
+            } else {
+                loop {
+                    let result = self
+                        .condvar
+                        .wait_timeout(
+                            status_lock,
+                            Duration::from_millis(self.config.get_timeout_millis as u64),
+                        )
+                        .unwrap();
+                    status_lock = result.0;
+                    if result.1.timed_out() {
+                        return Err(PoolError {
+                            message: String::from("No available connection in pool"),
+                        });
+                    } else {
+                        let opt_entry = self.bag.lease_entry();
+                        if opt_entry.is_some() {
+                            return Ok(PooledConnection::new(self.clone(), opt_entry.unwrap()));
+                        }
+                    }
+                }
+            }
+        }
+        Err(PoolError {
+            message: String::from("Internal Error while acquiring connection"),
+        })
+    }
+}
+
+pub trait ConnectionChecker: Send + Sync + 'static {
+    /// The connection type this manager deals with.
+    type Connection: Send + 'static;
+
+    /// The error type returned by `Connection`s.
+    type Error: error::Error + 'static;
+    /// Determines if the connection is still connected to the database.
+    ///
+    /// A standard implementation would check if a simple query like `SELECT 1`
+    /// succeeds.
+    fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error>;
+
+    /// *Quickly* determines if the connection is no longer usable.
+    ///
+    /// This will be called synchronously every time a connection is returned
+    /// to the pool, so it should *not* block. If it returns `true`, the
+    /// connection will be discarded.
+    ///
+    /// For example, an implementation might check if the underlying TCP socket
+    /// has disconnected. Implementations that do not support this kind of
+    /// fast health check may simply return `false`.
+    fn has_broken(&self, conn: &mut Self::Connection) -> bool;
+}
+
+pub struct PooledConnection<T>
+    where
+        T: ConnectionFactory,
+{
+    pool: ConnectionPool<T>,
+    conn: Arc<BagEntry<T::Connection>>,
+}
+
+impl<'a, T> Drop for PooledConnection<T>
+    where
+        T: ConnectionFactory,
+{
+    fn drop(&mut self) {
+        self.pool.release_connection(&(self.conn.as_ref()));
+    }
+}
+
+impl<'a, T> Deref for PooledConnection<T>
+    where
+        T: ConnectionFactory,
+{
+    type Target = T::Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.conn.as_ref().value()
+    }
+}
+
+impl<'a, T: ConnectionFactory> PooledConnection<T> {
+    pub fn new(pool: ConnectionPool<T>, conn: Arc<BagEntry<T::Connection>>) -> PooledConnection<T> {
+        PooledConnection { pool, conn }
     }
 }

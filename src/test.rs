@@ -41,3 +41,4 @@ fn test_concurrent_bag_remove() {
     assert!(opt_entry_1.is_none());
 
 }
+
