@@ -31,10 +31,10 @@ fn test_concurrent_bag_lease_release() {
 #[test]
 fn test_concurrent_bag_remove() {
     let concurrent_bag=ConcurrentBag::new();
-    let strHello=String::from("hello Rust");
-    let strHelloAgain=String::from("hello Rust again");
-    let id1=concurrent_bag.add_entry(strHello);
-    let id2=concurrent_bag.add_entry(strHelloAgain);
+    let str_hello=String::from("hello Rust");
+    let str_hello_again=String::from("hello Rust again");
+    let id1=concurrent_bag.add_entry(str_hello);
+    let id2=concurrent_bag.add_entry(str_hello_again);
     concurrent_bag.remove_entry(id1);
     concurrent_bag.remove_entry(id2);
     let opt_entry_1=concurrent_bag.lease_entry();

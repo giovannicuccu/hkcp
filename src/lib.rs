@@ -2,9 +2,10 @@ use std::cell::RefCell;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering, AtomicU8};
 use std::sync::{Arc, RwLock, Mutex, Condvar};
-use std::{fmt, error};
+use std::{fmt, error, thread};
 use thread_local::ThreadLocal;
 use std::time::Duration;
+use std::sync::mpsc::channel;
 
 #[cfg(test)]
 mod test;
@@ -160,7 +161,7 @@ pub trait ConnectionFactory: Send + Sync + 'static {
     type Connection: Send + Sync + 'static;
 
     /// The error type returned by `Connection`s.
-    type Error: error::Error + 'static;
+    type Error: error::Error + Send + 'static;
 
     /// Attempts to create a new connection.
     fn connect(&self) -> Result<Self::Connection, Self::Error>;
@@ -213,38 +214,90 @@ impl<T> Clone for ConnectionPool<T>
     }
 }
 
-impl<T: ConnectionFactory> ConnectionPool<T> {
-    pub fn new(connection_factory: T) -> ConnectionPool<T> {
-        ConnectionPool {
-            bag: Arc::new(ConcurrentBag::new()),
-            status: Arc::new(Mutex::new(ConnectionPoolStatus {
-                current_connections_num: 0,
-                connection_factory,
-            })),
-            config: Arc::new(ConnectionPoolConfig {
-                initial_connections: 1,
-                max_connections: 2,
-                connect_timeout_millis: 500,
-                get_timeout_millis: 500,
-            }),
-            condvar: Arc::new(Condvar::new()),
+fn create_initial_connections<T: ConnectionFactory>(status : &Arc<Mutex<ConnectionPoolStatus<T>>>, pool_config: &Arc<ConnectionPoolConfig>, bag : &Arc<ConcurrentBag<T::Connection>>) {
+/*    let lock_result = status.lock();
+    if lock_result.is_ok() {
+        let mut status_lock = lock_result.unwrap();
+        for _ in 1..pool_config.initial_connections {
+            let conn_res = status_lock.connection_factory.connect();
+            match conn_res {
+                Ok(conn) => {
+                    bag.add_entry(conn);
+                    status_lock.current_connections_num =
+                        status_lock.current_connections_num + 1;
+                }
+                Err(_) => {
+                    panic!("Error while creating initial connection");
+                }
+            }
+        }
+    }*/
+
+
+    for _ in 1..pool_config.initial_connections {
+        let status_in_thread=status.clone();
+        let (tx, rx) = channel::<Result<T::Connection, T::Error>>();
+        thread::spawn(move || {
+            let thread_status = status_in_thread.lock().unwrap();
+            let conn_res = thread_status.connection_factory.connect();
+            tx.send(conn_res).unwrap();
+        });
+        let thread_result=rx.recv_timeout(Duration::from_millis(pool_config.connect_timeout_millis as u64));
+        match thread_result {
+            Ok(conn_res) => {
+                match conn_res {
+                    Ok(conn) => {
+                        let lock_result = status.lock();
+                        if lock_result.is_ok() {
+                            let mut status_lock = lock_result.unwrap();
+                            bag.add_entry(conn);
+                            status_lock.current_connections_num =
+                                status_lock.current_connections_num + 1;
+                        }
+                    }
+                    Err(_) => {
+                        panic!("Error while creating initial connection");
+                    }
+                }
+            }
+            Err(_) => {
+                panic!("Timeout while creating initial connection");
+            }
         }
     }
+}
+
+impl<T: ConnectionFactory> ConnectionPool<T> {
 
     pub fn new_with_config(
         connection_factory: T,
         pool_config: ConnectionPoolConfig,
     ) -> ConnectionPool<T> {
+        let initial_status =Arc::new(Mutex::new(ConnectionPoolStatus {
+            current_connections_num: 0,
+            connection_factory,
+        }));
+        let initial_config=Arc::new(pool_config);
+        let initial_bag = Arc::new(ConcurrentBag::new());
+        create_initial_connections(&initial_status, &initial_config, &initial_bag);
         ConnectionPool {
-            bag: Arc::new(ConcurrentBag::new()),
-            status: Arc::new(Mutex::new(ConnectionPoolStatus {
-                current_connections_num: 0,
-                connection_factory,
-            })),
-            config: Arc::new(pool_config),
+            bag: initial_bag,
+            status: initial_status,
+            config: initial_config,
             condvar: Arc::new(Condvar::new()),
         }
     }
+
+    pub fn new(connection_factory: T) -> ConnectionPool<T> {
+        ConnectionPool::new_with_config(connection_factory, ConnectionPoolConfig {
+            initial_connections: 1,
+            max_connections: 2,
+            connect_timeout_millis: 500,
+            get_timeout_millis: 500,
+        })
+    }
+
+
 
     fn release_connection(&self, entry: &BagEntry<T::Connection>) {
         self.bag.release_entry(entry);
