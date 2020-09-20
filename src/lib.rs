@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock, Mutex, Condvar};
 use std::{fmt, error, thread};
 use thread_local::ThreadLocal;
 use std::time::Duration;
-use std::sync::mpsc::channel;
+use std::sync::mpsc::{channel};
 
 #[cfg(test)]
 mod test;
@@ -173,17 +173,17 @@ struct ConnectionPoolStatus<T: ConnectionFactory> {
 }
 
 #[derive(Debug, Clone)]
-pub struct PoolError {
+pub struct HkcpError {
     message: String,
 }
 
-impl fmt::Display for PoolError {
+impl fmt::Display for HkcpError {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         write!(fmt, "{}", self.message)
     }
 }
 
-impl std::error::Error for PoolError {
+impl std::error::Error for HkcpError {
     fn description(&self) -> &str {
         &self.message
     }
@@ -214,7 +214,7 @@ impl<T> Clone for ConnectionPool<T>
     }
 }
 
-fn create_initial_connections<T: ConnectionFactory>(status : &Arc<Mutex<ConnectionPoolStatus<T>>>, pool_config: &Arc<ConnectionPoolConfig>, bag : &Arc<ConcurrentBag<T::Connection>>) {
+fn create_initial_connections<T: ConnectionFactory>(status : &Arc<Mutex<ConnectionPoolStatus<T>>>, pool_config: &Arc<ConnectionPoolConfig>, bag : &Arc<ConcurrentBag<T::Connection>>)->Result<(),HkcpError> {
 /*    let lock_result = status.lock();
     if lock_result.is_ok() {
         let mut status_lock = lock_result.unwrap();
@@ -255,16 +255,17 @@ fn create_initial_connections<T: ConnectionFactory>(status : &Arc<Mutex<Connecti
                                 status_lock.current_connections_num + 1;
                         }
                     }
-                    Err(_) => {
-                        panic!("Error while creating initial connection");
+                    Err(error) => {
+                        return Err(HkcpError{message: error.to_string()});
                     }
                 }
             }
-            Err(_) => {
-                panic!("Timeout while creating initial connection");
+            Err(error) => {
+                return Err(HkcpError{message: error.to_string()});
             }
         }
     }
+    return Ok(());
 }
 
 impl<T: ConnectionFactory> ConnectionPool<T> {
@@ -272,23 +273,30 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
     pub fn new_with_config(
         connection_factory: T,
         pool_config: ConnectionPoolConfig,
-    ) -> ConnectionPool<T> {
+    ) -> Result<ConnectionPool<T>,HkcpError> {
         let initial_status =Arc::new(Mutex::new(ConnectionPoolStatus {
             current_connections_num: 0,
             connection_factory,
         }));
         let initial_config=Arc::new(pool_config);
         let initial_bag = Arc::new(ConcurrentBag::new());
-        create_initial_connections(&initial_status, &initial_config, &initial_bag);
-        ConnectionPool {
-            bag: initial_bag,
-            status: initial_status,
-            config: initial_config,
-            condvar: Arc::new(Condvar::new()),
+        let create_result=create_initial_connections(&initial_status, &initial_config, &initial_bag);
+        match create_result {
+            Ok(_) => {
+                Ok(ConnectionPool {
+                    bag: initial_bag,
+                    status: initial_status,
+                    config: initial_config,
+                    condvar: Arc::new(Condvar::new()),
+                })
+            }
+            Err(error) => {
+                Err(error)
+            }
         }
     }
 
-    pub fn new(connection_factory: T) -> ConnectionPool<T> {
+    pub fn new(connection_factory: T) -> Result<ConnectionPool<T>,HkcpError> {
         ConnectionPool::new_with_config(connection_factory, ConnectionPoolConfig {
             initial_connections: 1,
             max_connections: 2,
@@ -304,7 +312,7 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
         self.condvar.notify_one();
     }
 
-    pub fn get_connection(&self) -> Result<PooledConnection<T>, PoolError> {
+    pub fn get_connection(&self) -> Result<PooledConnection<T>, HkcpError> {
         let opt_entry = self.bag.lease_entry();
         if opt_entry.is_some() {
             return Ok(PooledConnection::new(self.clone(), opt_entry.unwrap()));
@@ -326,7 +334,7 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
                         }
                     }
                     Err(err) => {
-                        return Err(PoolError {
+                        return Err(HkcpError {
                             message: String::from(err.to_string()),
                         });
                     }
@@ -342,7 +350,7 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
                         .unwrap();
                     status_lock = result.0;
                     if result.1.timed_out() {
-                        return Err(PoolError {
+                        return Err(HkcpError {
                             message: String::from("No available connection in pool"),
                         });
                     } else {
@@ -354,7 +362,7 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
                 }
             }
         }
-        Err(PoolError {
+        Err(HkcpError {
             message: String::from("Internal Error while acquiring connection"),
         })
     }

@@ -8,7 +8,7 @@ mod common;
 #[test]
 fn test_pool_max_size_ok() {
     let my_pool: ConnectionPool<FakeDbDriver> =
-        ConnectionPool::new(FakeDbDriver {});
+        ConnectionPool::new(FakeDbDriver {}).unwrap();
 
     let mut conns = vec![];
     for _ in 0..2 {
@@ -19,7 +19,7 @@ fn test_pool_max_size_ok() {
 #[test]
 fn test_pool_acquire_release() {
     let my_pool: ConnectionPool<FakeDbDriver> =
-        ConnectionPool::new(FakeDbDriver {});
+        ConnectionPool::new(FakeDbDriver {}).unwrap();
 
     let conn1 = my_pool.get_connection().ok().unwrap();
     let conn2 = my_pool.get_connection().ok().unwrap();
@@ -35,7 +35,7 @@ fn get_timeout() {
         ConnectionPool::new_with_config(
             FakeDbDriver {},
             ConnectionPoolConfig::new(1, 1, 100, 100),
-        );
+        ).unwrap();
     let mut children = vec![];
     let succeeds_immediately = pool.get_connection();
     assert!(succeeds_immediately.is_ok());
