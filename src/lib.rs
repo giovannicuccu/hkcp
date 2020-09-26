@@ -167,9 +167,13 @@ pub trait ConnectionFactory: Send + Sync + 'static {
     fn connect(&self) -> Result<Self::Connection, Self::Error>;
 }
 
-struct ConnectionPoolStatus<T: ConnectionFactory> {
+/*struct ConnectionPoolStatus<T: ConnectionFactory> {
     current_connections_num: u16,
     connection_factory: T,
+}*/
+
+struct ConnectionPoolStatus {
+    current_connections_num: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -194,7 +198,8 @@ pub struct ConnectionPool<T>
         T: ConnectionFactory,
 {
     bag: Arc<ConcurrentBag<T::Connection>>,
-    status: Arc<Mutex<ConnectionPoolStatus<T>>>,
+    status: Arc<Mutex<ConnectionPoolStatus>>,
+    connection_factory: Arc<T>,
     config: Arc<ConnectionPoolConfig>,
     condvar: Arc<Condvar>,
 }
@@ -208,65 +213,92 @@ impl<T> Clone for ConnectionPool<T>
         ConnectionPool {
             bag: self.bag.clone(),
             status: self.status.clone(),
+            connection_factory: self.connection_factory.clone(),
             config: self.config.clone(),
             condvar: self.condvar.clone(),
         }
     }
 }
 
-fn create_initial_connections<T: ConnectionFactory>(status : &Arc<Mutex<ConnectionPoolStatus<T>>>, pool_config: &Arc<ConnectionPoolConfig>, bag : &Arc<ConcurrentBag<T::Connection>>)->Result<(),HkcpError> {
-/*    let lock_result = status.lock();
-    if lock_result.is_ok() {
-        let mut status_lock = lock_result.unwrap();
-        for _ in 1..pool_config.initial_connections {
-            let conn_res = status_lock.connection_factory.connect();
-            match conn_res {
-                Ok(conn) => {
-                    bag.add_entry(conn);
-                    status_lock.current_connections_num =
-                        status_lock.current_connections_num + 1;
-                }
-                Err(_) => {
-                    panic!("Error while creating initial connection");
-                }
-            }
-        }
-    }*/
-
-
+fn create_initial_connections<T: ConnectionFactory>(status : &Arc<Mutex<ConnectionPoolStatus>>,
+                                                    pool_config: &Arc<ConnectionPoolConfig>,
+                                                    bag : &Arc<ConcurrentBag<T::Connection>>,
+                                                    connection_factory: &Arc<T>,
+                                                    condvar: &Arc<Condvar>)->Result<(),HkcpError> {
     for _ in 1..pool_config.initial_connections {
-        let status_in_thread=status.clone();
-        let (tx, rx) = channel::<Result<T::Connection, T::Error>>();
-        thread::spawn(move || {
-            let thread_status = status_in_thread.lock().unwrap();
-            let conn_res = thread_status.connection_factory.connect();
-            tx.send(conn_res).unwrap();
-        });
-        let thread_result=rx.recv_timeout(Duration::from_millis(pool_config.connect_timeout_millis as u64));
-        match thread_result {
-            Ok(conn_res) => {
-                match conn_res {
-                    Ok(conn) => {
-                        let lock_result = status.lock();
-                        if lock_result.is_ok() {
-                            let mut status_lock = lock_result.unwrap();
-                            bag.add_entry(conn);
-                            status_lock.current_connections_num =
-                                status_lock.current_connections_num + 1;
-                        }
-                    }
-                    Err(error) => {
-                        return Err(HkcpError{message: error.to_string()});
-                    }
-                }
-            }
-            Err(error) => {
-                return Err(HkcpError{message: error.to_string()});
-            }
+        let create_result = create_connection(status, pool_config, bag,
+                                              connection_factory, condvar);
+        if create_result.is_err() {
+            return Err(create_result.err().unwrap());
         }
     }
     return Ok(());
 }
+
+fn create_connection<T: ConnectionFactory>(status : &Arc<Mutex<ConnectionPoolStatus>>,
+                                           pool_config: &Arc<ConnectionPoolConfig>,
+                                           bag : &Arc<ConcurrentBag<T::Connection>>,
+                                           connection_factory: &Arc<T>,
+                                           condvar: &Arc<Condvar>)->Result<Arc<BagEntry<T::Connection>>,HkcpError> {
+    let lock_result = status.lock();
+    if lock_result.is_err() {
+        return Err(HkcpError { message: String::from("Internal Error while locking status") });
+    }
+    let mut status_lock = lock_result.unwrap();
+    if status_lock.current_connections_num < pool_config.max_connections {
+        let connection_factory_in_thread = connection_factory.clone();
+        let (tx, rx) = channel::<Result<T::Connection, T::Error>>();
+        thread::spawn(move || {
+            let conn_res = connection_factory_in_thread.connect();
+            tx.send(conn_res).unwrap();
+        });
+        let thread_result = rx.recv_timeout(Duration::from_millis(pool_config.connect_timeout_millis as u64));
+        match thread_result {
+            Ok(conn_res) => {
+                match conn_res {
+                    Ok(conn) => {
+                        bag.add_entry(conn);
+                        status_lock.current_connections_num =
+                            status_lock.current_connections_num + 1;
+                        let opt_entry = bag.lease_entry();
+                        if opt_entry.is_some() {
+                            return Ok(opt_entry.unwrap());
+                        }
+                        return Err(HkcpError { message: String::from("Internal Error while getting entry from bag") });
+                    }
+                    Err(error) => {
+                        return Err(HkcpError { message: error.to_string() });
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(HkcpError { message: error.to_string() });
+            }
+        }
+    } else {
+        loop {
+            let result = condvar
+                .wait_timeout(
+                    status_lock,
+                    Duration::from_millis(pool_config.get_timeout_millis as u64),
+                )
+                .unwrap();
+            status_lock = result.0;
+            if result.1.timed_out() {
+                return Err(HkcpError {
+                    message: String::from("No available connection in pool"),
+                });
+            } else {
+                let opt_entry = bag.lease_entry();
+                if opt_entry.is_some() {
+                    return Ok(opt_entry.unwrap());
+                }
+            }
+        }
+    }
+}
+
+
 
 impl<T: ConnectionFactory> ConnectionPool<T> {
 
@@ -276,18 +308,23 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
     ) -> Result<ConnectionPool<T>,HkcpError> {
         let initial_status =Arc::new(Mutex::new(ConnectionPoolStatus {
             current_connections_num: 0,
-            connection_factory,
         }));
         let initial_config=Arc::new(pool_config);
         let initial_bag = Arc::new(ConcurrentBag::new());
-        let create_result=create_initial_connections(&initial_status, &initial_config, &initial_bag);
+        let initial_connection_factory= Arc::new(connection_factory);
+        let initial_condvar=Arc::new(Condvar::new());
+        let create_result=create_initial_connections(&initial_status,
+                                                     &initial_config, &initial_bag,
+                                                     &initial_connection_factory, &initial_condvar);
+
         match create_result {
             Ok(_) => {
                 Ok(ConnectionPool {
                     bag: initial_bag,
                     status: initial_status,
+                    connection_factory: initial_connection_factory,
                     config: initial_config,
-                    condvar: Arc::new(Condvar::new()),
+                    condvar: initial_condvar,
                 })
             }
             Err(error) => {
@@ -318,53 +355,19 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
             return Ok(PooledConnection::new(self.clone(), opt_entry.unwrap()));
         }
 
-        let lock_result = self.status.lock();
-        if lock_result.is_ok() {
-            let mut status_lock = lock_result.unwrap();
-            if status_lock.current_connections_num < self.config.max_connections {
-                let conn_res = status_lock.connection_factory.connect();
-                match conn_res {
-                    Ok(conn) => {
-                        self.bag.add_entry(conn);
-                        status_lock.current_connections_num =
-                            status_lock.current_connections_num + 1;
-                        let opt_entry = self.bag.lease_entry();
-                        if opt_entry.is_some() {
-                            return Ok(PooledConnection::new(self.clone(), opt_entry.unwrap()));
-                        }
-                    }
-                    Err(err) => {
-                        return Err(HkcpError {
-                            message: String::from(err.to_string()),
-                        });
-                    }
-                }
-            } else {
-                loop {
-                    let result = self
-                        .condvar
-                        .wait_timeout(
-                            status_lock,
-                            Duration::from_millis(self.config.get_timeout_millis as u64),
-                        )
-                        .unwrap();
-                    status_lock = result.0;
-                    if result.1.timed_out() {
-                        return Err(HkcpError {
-                            message: String::from("No available connection in pool"),
-                        });
-                    } else {
-                        let opt_entry = self.bag.lease_entry();
-                        if opt_entry.is_some() {
-                            return Ok(PooledConnection::new(self.clone(), opt_entry.unwrap()));
-                        }
-                    }
-                }
+        let create_result = create_connection(&self.status,
+                                              &self.config, &self.bag,
+                                              &self.connection_factory, &self.condvar);
+        match create_result {
+            Ok(bag_entry) => {
+                Ok(PooledConnection::new(self.clone(), bag_entry))
+            }
+            Err(err) => {
+                Err(err)
             }
         }
-        Err(HkcpError {
-            message: String::from("Internal Error while acquiring connection"),
-        })
+
+
     }
 }
 
