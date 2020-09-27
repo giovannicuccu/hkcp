@@ -1,5 +1,5 @@
 use hkcp::{ConnectionPool, ConnectionPoolConfig};
-use crate::common::FakeDbDriver;
+use crate::common::{FakeDbDriver, FakeDbWithTimeoutDriver};
 use std::thread;
 use std::time::Duration;
 
@@ -48,10 +48,33 @@ fn get_timeout() {
     assert!(succeeds_delayed.is_ok());
 
     children.push(thread::spawn(move || {
-        thread::sleep(Duration::from_millis(150));
+        thread::sleep(Duration::from_millis(250));
         drop(succeeds_delayed);
     }));
 
     let fails = pool.get_connection();
     assert!(fails.is_err());
+}
+
+#[test]
+fn connect_timeout_err() {
+    let new_result =
+        ConnectionPool::new_with_config(
+            FakeDbWithTimeoutDriver { timeout_mills: 150},
+            ConnectionPoolConfig::new(1, 1, 100, 100),
+        );
+    assert!(new_result.is_err())
+}
+
+#[test]
+fn connect_timeout_ok() {
+    let new_result =
+        ConnectionPool::new_with_config(
+            FakeDbWithTimeoutDriver { timeout_mills: 80},
+            ConnectionPoolConfig::new(1, 1, 100, 100),
+        );
+    if new_result.is_err() {
+        println!("err={}", new_result.as_ref().err().unwrap().to_string())
+    }
+    assert!(new_result.is_ok())
 }
