@@ -57,7 +57,7 @@ fn get_timeout() {
 }
 
 #[test]
-fn connect_timeout_err() {
+fn initial_connect_timeout_err() {
     let new_result =
         ConnectionPool::new_with_config(
             FakeDbWithTimeoutDriver { timeout_mills: 150},
@@ -67,14 +67,23 @@ fn connect_timeout_err() {
 }
 
 #[test]
+fn connect_timeout_err() {
+    let new_result =
+        ConnectionPool::new_with_config(
+            FakeDbWithTimeoutDriver { timeout_mills: 150},
+            ConnectionPoolConfig::new(0, 1, 100, 100),
+        );
+    assert!(new_result.is_ok());
+    let fail_first = new_result.unwrap().get_connection();
+    assert!(fail_first.is_err());
+}
+
+#[test]
 fn connect_timeout_ok() {
     let new_result =
         ConnectionPool::new_with_config(
             FakeDbWithTimeoutDriver { timeout_mills: 80},
             ConnectionPoolConfig::new(1, 1, 100, 100),
         );
-    if new_result.is_err() {
-        println!("err={}", new_result.as_ref().err().unwrap().to_string())
-    }
     assert!(new_result.is_ok())
 }
