@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock, Mutex, Condvar};
 use std::{fmt, error, thread};
 use thread_local::ThreadLocal;
 use std::time::Duration;
-use std::sync::mpsc::{channel};
+use crossbeam_channel::unbounded;
 
 #[cfg(test)]
 mod test;
@@ -155,7 +155,12 @@ impl ConnectionPoolConfig {
         }
     }
 }
-
+/// A trait which allows for customization of connections.
+/// This trait is a simplified form of the trait with the same name defined in R2D2 package
+/// https://github.com/sfackler/r2d2 licensed under either of
+///     Apache License, Version 2.0 (LICENSE-APACHE or http://www.apache.org/licenses/LICENSE-2.0)
+///     MIT license (LICENSE-MIT or http://opensource.org/licenses/MIT)
+/// at your option
 pub trait ConnectionFactory: Send + Sync + 'static {
     /// The connection type this manager deals with.
     type Connection: Send + Sync + 'static;
@@ -165,6 +170,8 @@ pub trait ConnectionFactory: Send + Sync + 'static {
 
     /// Attempts to create a new connection.
     fn connect(&self) -> Result<Self::Connection, Self::Error>;
+
+    fn is_valid(&self, conn: &Self::Connection) -> bool;
 }
 
 /*struct ConnectionPoolStatus<T: ConnectionFactory> {
@@ -244,7 +251,7 @@ fn create_connection<T: ConnectionFactory>(config: &Arc<ConnectionPoolConfig>,
                                            bag : &Arc<ConcurrentBag<T::Connection>>,
                                            connection_factory: &Arc<T>)->Result<(),HkcpError> {
     let connection_factory_in_thread = connection_factory.clone();
-    let (tx, rx) = channel::<Result<T::Connection, T::Error>>();
+    let (tx, rx) = unbounded();
     thread::spawn(move || {
         let conn_res = connection_factory_in_thread.connect();
         tx.send(conn_res)
@@ -321,7 +328,19 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
     pub fn get_connection(&self) -> Result<PooledConnection<T>, HkcpError> {
         let opt_entry = self.bag.lease_entry();
         if opt_entry.is_some() {
-            return Ok(PooledConnection::new(self.clone(), opt_entry.unwrap()));
+            let conn=opt_entry.unwrap();
+            return if self.connection_factory.is_valid(&conn.value) {
+                Ok(PooledConnection::new(self.clone(), conn))
+            } else {
+                let lock_result = self.status.lock();
+                if lock_result.is_err() {
+                    return Err(HkcpError { message: String::from("Internal Error while locking status") });
+                }
+                let mut status_lock = lock_result.unwrap();
+                status_lock.current_connections_num=status_lock.current_connections_num-1;
+                self.bag.remove_entry(conn.id);
+                self.get_connection()
+            }
         }
 
         let create_result = self.get_connection_internal();
@@ -376,36 +395,24 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
                 } else {
                     let opt_entry = self.bag.lease_entry();
                     if opt_entry.is_some() {
-                        return Ok(opt_entry.unwrap());
+                        let conn=opt_entry.unwrap();
+                        return if self.connection_factory.is_valid(&conn.value) {
+                            Ok(conn)
+                        } else {
+                            let lock_result = self.status.lock();
+                            if lock_result.is_err() {
+                                return Err(HkcpError { message: String::from("Internal Error while locking status") });
+                            }
+                            let mut status_lock = lock_result.unwrap();
+                            status_lock.current_connections_num=status_lock.current_connections_num-1;
+                            self.bag.remove_entry(conn.id);
+                            self.get_connection_internal()
+                        }
                     }
                 }
             }
         }
     }
-}
-
-pub trait ConnectionChecker: Send + Sync + 'static {
-    /// The connection type this manager deals with.
-    type Connection: Send + 'static;
-
-    /// The error type returned by `Connection`s.
-    type Error: error::Error + 'static;
-    /// Determines if the connection is still connected to the database.
-    ///
-    /// A standard implementation would check if a simple query like `SELECT 1`
-    /// succeeds.
-    fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error>;
-
-    /// *Quickly* determines if the connection is no longer usable.
-    ///
-    /// This will be called synchronously every time a connection is returned
-    /// to the pool, so it should *not* block. If it returns `true`, the
-    /// connection will be discarded.
-    ///
-    /// For example, an implementation might check if the underlying TCP socket
-    /// has disconnected. Implementations that do not support this kind of
-    /// fast health check may simply return `false`.
-    fn has_broken(&self, conn: &mut Self::Connection) -> bool;
 }
 
 pub struct PooledConnection<T>

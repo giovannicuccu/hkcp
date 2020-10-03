@@ -29,6 +29,8 @@ impl ConnectionFactory for FakeDbDriver {
     fn connect(&self) -> Result<FakeConnection, FakeError> {
         Ok(FakeConnection {})
     }
+
+    fn is_valid(&self, _conn: &Self::Connection) -> bool { true }
 }
 
 pub struct FakeDbWithTimeoutDriver {
@@ -43,4 +45,5 @@ impl ConnectionFactory for FakeDbWithTimeoutDriver {
         thread::sleep(Duration::from_millis(self.timeout_mills as u64));
         Ok(FakeConnection {})
     }
+    fn is_valid(&self, _conn: &Self::Connection) -> bool { true }
 }
