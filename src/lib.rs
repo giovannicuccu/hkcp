@@ -1,137 +1,17 @@
-use std::cell::RefCell;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicUsize, Ordering, AtomicU8};
 use std::sync::{Arc, RwLock, Mutex, Condvar};
 use std::{fmt, error, thread};
 use thread_local::ThreadLocal;
 use std::time::Duration;
 use crossbeam_channel::unbounded;
+use crate::concurrent_bag::SimpleBag;
+
+mod concurrent_bag;
 
 #[cfg(test)]
 mod test;
 
-const USED: u8 = 2;
-const UNUSED: u8 = 4;
-//const DELETED: u8 = 16;
 
-static COUNTER: AtomicUsize = AtomicUsize::new(1);
-
-trait BagEntryType: Send + Sync {}
-
-pub struct BagEntry<T: Send + Sync> {
-    state: AtomicU8,
-    value: T,
-    id: usize,
-}
-
-impl<'a, T: Send + Sync> BagEntry<T> {
-    pub fn new(value: T) -> BagEntry<T> {
-        BagEntry {
-            value,
-            state: AtomicU8::new(UNUSED),
-            id: COUNTER.fetch_add(10, Ordering::SeqCst),
-        }
-    }
-
-    pub fn value(&self) -> &T {
-        &self.value
-    }
-
-    pub fn as_mut_value(&mut self) -> &mut T {
-        &mut self.value
-    }
-
-    pub fn id(&self) -> usize {
-        self.id
-    }
-}
-
-impl<T: Send + Sync> PartialEq for BagEntry<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
-impl<T: Send + Sync> fmt::Display for BagEntry<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "BagEntry id {}", self.id)
-    }
-}
-
-pub struct ConcurrentBag<T: Send + Sync> {
-    entry_list: RwLock<Vec<Arc<BagEntry<T>>>>,
-    local_entry_list: ThreadLocal<RefCell<Vec<Arc<BagEntry<T>>>>>,
-}
-
-impl<'a, T: Send + Sync> ConcurrentBag<T> {
-    pub fn new() -> ConcurrentBag<T> {
-        ConcurrentBag {
-            entry_list: RwLock::new(vec![]),
-            local_entry_list: ThreadLocal::new(),
-        }
-    }
-
-    pub fn lease_entry(&self) -> Option<Arc<BagEntry<T>>> {
-        let local_list_ref = self.local_entry_list.get_or(|| RefCell::new(vec![]));
-        let mut local_list = (*local_list_ref).borrow_mut();
-        let opt_bag_entry = self.find_in_list(&local_list);
-        match opt_bag_entry {
-            Some(entry_list) => Option::Some(entry_list),
-            None => {
-                let entry_list = self.entry_list.read().unwrap();
-                let opt_bag_entry_notl = self.find_in_list(entry_list.deref());
-                match opt_bag_entry_notl {
-                    Some(bag_entry) => {
-                        local_list.push(Arc::clone(&bag_entry));
-                        Option::Some(bag_entry)
-                    }
-                    None => Option::None
-                }
-            }
-        }
-    }
-
-    fn find_in_list(&self, list: &Vec<Arc<BagEntry<T>>>) -> Option<Arc<BagEntry<T>>> {
-        for bag_entry in list.iter() {
-            let actual_state = bag_entry.state.load(Ordering::Acquire);
-            if actual_state == UNUSED {
-                let state = bag_entry.state.compare_and_swap(UNUSED, USED, Ordering::Acquire);
-                if state == UNUSED {
-                    return Option::Some(Arc::clone(bag_entry));
-                }
-            }
-        }
-        Option::None
-    }
-
-    pub fn release_entry(&self, entry: &BagEntry<T>) {
-        let entry_list = self.entry_list.read().unwrap();
-        //println!("Release entry size {}", entry_list.len());
-        let opt_pos = entry_list
-            .iter()
-            .position(|entry_it| (**entry_it) == *entry);
-        if opt_pos.is_some() {
-            let found_entry = entry_list.get(opt_pos.unwrap()).unwrap();
-            found_entry.state.swap(UNUSED, Ordering::Acquire);
-        }
-    }
-
-    pub fn add_entry(&self, value: T) -> usize {
-        let mut entry_list = self.entry_list.write().unwrap();
-        let bag_entry=BagEntry::new(value);
-        let id =bag_entry.id;
-        entry_list.push(Arc::new(bag_entry));
-        id
-    }
-
-    pub fn remove_entry(&self, value: usize) {
-        let mut entry_list = self.entry_list.write().unwrap();
-        let index_opt = entry_list.iter().position(|x| x.id == value);
-        if index_opt.is_some() {
-            entry_list.remove(index_opt.unwrap());
-        }
-    }
-}
 
 pub struct ConnectionPoolConfig {
     initial_connections: u16,
@@ -174,10 +54,6 @@ pub trait ConnectionFactory: Send + Sync + 'static {
     fn is_valid(&self, conn: &Self::Connection) -> bool;
 }
 
-/*struct ConnectionPoolStatus<T: ConnectionFactory> {
-    current_connections_num: u16,
-    connection_factory: T,
-}*/
 
 struct ConnectionPoolStatus {
     current_connections_num: u16,
@@ -204,7 +80,7 @@ pub struct ConnectionPool<T>
     where
         T: ConnectionFactory,
 {
-    bag: Arc<ConcurrentBag<T::Connection>>,
+    bag: Arc<SimpleBag<T::Connection>>,
     status: Arc<Mutex<ConnectionPoolStatus>>,
     connection_factory: Arc<T>,
     config: Arc<ConnectionPoolConfig>,
@@ -229,7 +105,7 @@ impl<T> Clone for ConnectionPool<T>
 
 fn create_initial_connections<T: ConnectionFactory>(status : &Arc<Mutex<ConnectionPoolStatus>>,
                                                     pool_config: &Arc<ConnectionPoolConfig>,
-                                                    bag : &Arc<ConcurrentBag<T::Connection>>,
+                                                    bag : &Arc<SimpleBag<T::Connection>>,
                                                     connection_factory: &Arc<T>)->Result<(),HkcpError> {
     let lock_result = status.lock();
     if lock_result.is_err() {
@@ -248,7 +124,7 @@ fn create_initial_connections<T: ConnectionFactory>(status : &Arc<Mutex<Connecti
 
 fn create_connection<T: ConnectionFactory>(config: &Arc<ConnectionPoolConfig>,
                                            status : &mut ConnectionPoolStatus,
-                                           bag : &Arc<ConcurrentBag<T::Connection>>,
+                                           bag : &Arc<SimpleBag<T::Connection>>,
                                            connection_factory: &Arc<T>)->Result<(),HkcpError> {
     let connection_factory_in_thread = connection_factory.clone();
     let (tx, rx) = unbounded();
@@ -263,7 +139,7 @@ fn create_connection<T: ConnectionFactory>(config: &Arc<ConnectionPoolConfig>,
                 Ok(conn) => {
                     status.current_connections_num =
                         status.current_connections_num + 1;
-                    bag.add_entry(conn);
+                    bag.release_entry(conn);
                     Ok(())
                 }
                 Err(error) => {
@@ -286,8 +162,9 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
         let initial_status =Arc::new(Mutex::new(ConnectionPoolStatus {
             current_connections_num: 0,
         }));
+        let max_conn=pool_config.max_connections;
         let initial_config=Arc::new(pool_config);
-        let initial_bag = Arc::new(ConcurrentBag::new());
+        let initial_bag = Arc::new(SimpleBag::new(max_conn));
         let initial_connection_factory= Arc::new(connection_factory);
         let create_result=create_initial_connections(&initial_status,
                                                      &initial_config, &initial_bag,
@@ -320,16 +197,16 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
 
 
 
-    fn release_connection(&self, entry: &BagEntry<T::Connection>) {
+    fn release_connection(&self, entry: T::Connection) {
         self.bag.release_entry(entry);
         self.condvar.notify_one();
     }
 
     pub fn get_connection(&self) -> Result<PooledConnection<T>, HkcpError> {
-        let opt_entry = self.bag.lease_entry();
+        let opt_entry = self.bag.borrow_entry();
         if opt_entry.is_some() {
             let conn=opt_entry.unwrap();
-            return if self.connection_factory.is_valid(&conn.value) {
+            return if self.connection_factory.is_valid(&conn) {
                 Ok(PooledConnection::new(self.clone(), conn))
             } else {
                 let lock_result = self.status.lock();
@@ -338,7 +215,6 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
                 }
                 let mut status_lock = lock_result.unwrap();
                 status_lock.current_connections_num=status_lock.current_connections_num-1;
-                self.bag.remove_entry(conn.id);
                 self.get_connection()
             }
         }
@@ -356,7 +232,7 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
 
     }
 
-    fn get_connection_internal(&self)->Result<Arc<BagEntry<T::Connection>>,HkcpError> {
+    fn get_connection_internal(&self)->Result<T::Connection,HkcpError> {
         let lock_result = self.status.lock();
         if lock_result.is_err() {
             return Err(HkcpError { message: String::from("Internal Error while locking status") });
@@ -369,7 +245,7 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
                 Ok(()) => {
                     status_lock.current_connections_num =
                         status_lock.current_connections_num + 1;
-                    let opt_entry = self.bag.lease_entry();
+                    let opt_entry = self.bag.borrow_entry();
                     if opt_entry.is_some() {
                         return Ok(opt_entry.unwrap());
                     }
@@ -393,10 +269,10 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
                         message: String::from("No available connection in pool"),
                     });
                 } else {
-                    let opt_entry = self.bag.lease_entry();
+                    let opt_entry = self.bag.borrow_entry();
                     if opt_entry.is_some() {
                         let conn=opt_entry.unwrap();
-                        return if self.connection_factory.is_valid(&conn.value) {
+                        return if self.connection_factory.is_valid(&conn) {
                             Ok(conn)
                         } else {
                             let lock_result = self.status.lock();
@@ -405,7 +281,6 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
                             }
                             let mut status_lock = lock_result.unwrap();
                             status_lock.current_connections_num=status_lock.current_connections_num-1;
-                            self.bag.remove_entry(conn.id);
                             self.get_connection_internal()
                         }
                     }
@@ -420,7 +295,7 @@ pub struct PooledConnection<T>
         T: ConnectionFactory,
 {
     pool: ConnectionPool<T>,
-    conn: Arc<BagEntry<T::Connection>>,
+    conn: Option<T::Connection>,
 }
 
 impl<'a, T> Drop for PooledConnection<T>
@@ -428,7 +303,7 @@ impl<'a, T> Drop for PooledConnection<T>
         T: ConnectionFactory,
 {
     fn drop(&mut self) {
-        self.pool.release_connection(&(self.conn.as_ref()));
+        self.pool.release_connection(self.conn.take().unwrap());
     }
 }
 
@@ -439,12 +314,12 @@ impl<'a, T> Deref for PooledConnection<T>
     type Target = T::Connection;
 
     fn deref(&self) -> &Self::Target {
-        &self.conn.as_ref().value()
+        self.conn.as_ref().unwrap()
     }
 }
 
 impl<'a, T: ConnectionFactory> PooledConnection<T> {
-    pub fn new(pool: ConnectionPool<T>, conn: Arc<BagEntry<T::Connection>>) -> PooledConnection<T> {
-        PooledConnection { pool, conn }
+    pub fn new(pool: ConnectionPool<T>, conn: T::Connection) -> PooledConnection<T> {
+        PooledConnection { pool, conn:Some(conn) }
     }
 }
