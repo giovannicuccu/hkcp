@@ -12,3 +12,6 @@ parking_lot = "0.10"
 chrono = "0.4"
 crossbeam-channel = "0.4"
 rand = "0.7.3"
+
+[dev-dependencies]
+r2d2 = "0.8.8"

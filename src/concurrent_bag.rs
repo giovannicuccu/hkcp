@@ -1,32 +1,30 @@
-use core::fmt;
-use parking_lot::{Condvar, Mutex};
+use parking_lot::{Mutex};
 use rand::prelude::*;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::Duration;
 
 pub struct SimpleBag<T> {
     entry_list: Vec<Mutex<Option<T>>>,
     available_entries: AtomicU16,
-    mutex_for_wait: Mutex<bool>,
-    condition_for_wait: Condvar,
+    //mutex_for_wait: Mutex<bool>,
+    //condition_for_wait: Condvar,
 }
 
 impl<'a, T> SimpleBag<T> {
     pub fn new(initial_size: u16) -> SimpleBag<T> {
         let mut local_entry_list = vec![];
-        for i in 0..initial_size {
+        for _i in 0..initial_size {
             local_entry_list.push(Mutex::new(None));
         }
         SimpleBag {
             entry_list: local_entry_list,
             available_entries: AtomicU16::new(0),
-            mutex_for_wait: Mutex::new(false),
-            condition_for_wait: Condvar::new(),
+            //mutex_for_wait: Mutex::new(false),
+            //condition_for_wait: Condvar::new(),
         }
     }
 
     pub fn borrow_entry(&self) -> Option<T> {
-        let opt_value = self.borrow_entry_std();
+        /*let opt_value = self.borrow_entry_std();
         if opt_value.is_none() {
             let mut mutex_guard = self.mutex_for_wait.lock();
             let wait_result = self
@@ -38,7 +36,8 @@ impl<'a, T> SimpleBag<T> {
                 self.borrow_entry_std()
             };
         }
-        opt_value
+        opt_value*/
+        self.borrow_entry_std()
     }
 
     pub fn borrow_entry_std(&self) -> Option<T> {
@@ -89,8 +88,8 @@ impl<'a, T> SimpleBag<T> {
 
     pub fn release_entry(&self, entry: T) {
         self.release_entry_std(entry);
-        self.mutex_for_wait.lock();
-        self.condition_for_wait.notify_one();
+        //self.mutex_for_wait.lock();
+        //self.condition_for_wait.notify_one();
     }
 
     pub fn release_entry_std(&self, entry: T) {
@@ -204,78 +203,5 @@ mod tests {
         assert_eq!(str, String::from("hello,hello Rust"));
     }
 
-    #[test]
-    fn test_mt() {
-        let simple_bag: SimpleBag<String> = SimpleBag::new(10);
-        simple_bag.release_entry(String::from("hello Rust 1"));
-        simple_bag.release_entry(String::from("hello Rust 2"));
-        simple_bag.release_entry(String::from("hello Rust 3"));
-        simple_bag.release_entry(String::from("hello Rust 4"));
-        simple_bag.release_entry(String::from("hello Rust 5"));
-        simple_bag.release_entry(String::from("hello Rust 6"));
-        simple_bag.release_entry(String::from("hello Rust 7"));
-        simple_bag.release_entry(String::from("hello Rust 8"));
-        simple_bag.release_entry(String::from("hello Rust 9"));
-        simple_bag.release_entry(String::from("hello Rust 10"));
-        assert_eq!(simple_bag.size(), 10);
-        assert_eq!(simple_bag.available_size(), 10);
 
-        let shared_bag = Arc::new(simple_bag);
-        let ok_shared = Arc::new(AtomicU16::new(0));
-        let ko_shared = Arc::new(AtomicU16::new(0));
-        let mut handle_vec = vec![];
-        let start = Instant::now();
-
-        for _ in 0..100 {
-            let bag_for_thread = Arc::clone(&shared_bag);
-            let ok_for_thread = Arc::clone(&ok_shared);
-            let ko_for_thread = Arc::clone(&ko_shared);
-            let handle = thread::spawn(move || {
-                let mut rng = thread_rng();
-                let randomvalue = rng.gen_range(0, 30);
-                let ten_millis = time::Duration::from_millis(randomvalue);
-                thread::sleep(ten_millis);
-                let opt_str = bag_for_thread.borrow_entry();
-                if opt_str.is_some() {
-                    let mut str = opt_str.unwrap();
-                    let mut rng = thread_rng();
-                    let randomvalue = rng.gen_range(0, 5);
-                    let ten_millis = time::Duration::from_millis(randomvalue);
-                    thread::sleep(ten_millis);
-                    bag_for_thread.release_entry(str);
-                    ok_for_thread.fetch_add(1, Ordering::SeqCst);
-                } else {
-                    ko_for_thread.fetch_add(1, Ordering::SeqCst);
-                }
-                let randomvalue = rng.gen_range(0, 30);
-                let ten_millis = time::Duration::from_millis(randomvalue);
-                thread::sleep(ten_millis);
-                let opt_str = bag_for_thread.borrow_entry();
-                if opt_str.is_some() {
-                    let mut str = opt_str.unwrap();
-                    let mut rng = thread_rng();
-                    let randomvalue = rng.gen_range(0, 5);
-                    let ten_millis = time::Duration::from_millis(randomvalue);
-                    thread::sleep(ten_millis);
-                    bag_for_thread.release_entry(str);
-                    ok_for_thread.fetch_add(1, Ordering::SeqCst);
-                } else {
-                    ko_for_thread.fetch_add(1, Ordering::SeqCst);
-                }
-            });
-            handle_vec.push(handle);
-        }
-
-        for handle in handle_vec {
-            handle.join().unwrap();
-        }
-        let duration = start.elapsed();
-
-        println!(
-            "Time elapsed in expensive_function() is: {:?} ok={:?} ko={:?}",
-            duration,
-            ok_shared.load(Ordering::Relaxed),
-            ko_shared.load(Ordering::Relaxed)
-        );
-    }
 }

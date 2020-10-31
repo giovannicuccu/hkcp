@@ -1,7 +1,6 @@
 use std::ops::Deref;
-use std::sync::{Arc, RwLock, Mutex, Condvar};
+use std::sync::{Arc,  Mutex, Condvar};
 use std::{fmt, error, thread};
-use thread_local::ThreadLocal;
 use std::time::Duration;
 use crossbeam_channel::unbounded;
 use crate::concurrent_bag::SimpleBag;
@@ -14,10 +13,10 @@ mod test;
 
 
 pub struct ConnectionPoolConfig {
-    initial_connections: u16,
-    max_connections: u16,
-    connect_timeout_millis: u32,
-    get_timeout_millis: u32,
+    pub initial_connections: u16,
+    pub max_connections: u16,
+    pub connect_timeout_millis: u32,
+    pub get_timeout_millis: u32,
 }
 
 impl ConnectionPoolConfig {
@@ -191,7 +190,7 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
             initial_connections: 1,
             max_connections: 2,
             connect_timeout_millis: 500,
-            get_timeout_millis: 500,
+            get_timeout_millis: 5000,
         })
     }
 

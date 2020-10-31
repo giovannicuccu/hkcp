@@ -47,3 +47,20 @@ impl ConnectionFactory for FakeDbWithTimeoutDriver {
     }
     fn is_valid(&self, _conn: &Self::Connection) -> bool { true }
 }
+
+impl r2d2::ManageConnection for FakeDbDriver {
+    type Connection = FakeConnection;
+    type Error = FakeError;
+
+    fn connect(&self) -> Result<FakeConnection, FakeError> {
+        Ok(FakeConnection {})
+    }
+
+    fn is_valid(&self, conn: &mut FakeConnection) -> Result<(), FakeError> {
+        Ok(())
+    }
+
+    fn has_broken(&self, conn: &mut FakeConnection) -> bool {
+        false
+    }
+}
