@@ -79,20 +79,20 @@ impl std::error::Error for HkcpError {
     }
 }
 
-pub struct ConnectionPool<T>
+pub struct InternalPool<T>
     where
         T: ConnectionFactory,
 {
-    bag: Arc<ConcurrentBag<T::Connection>>,
-    status: Arc<Mutex<ConnectionPoolStatus>>,
-    available_entries: Arc<AtomicU16>,
+    bag: ConcurrentBag<T::Connection>,
+    status: Mutex<ConnectionPoolStatus>,
+    available_entries: AtomicU16,
     connection_factory: Arc<T>,
-    config: Arc<ConnectionPoolConfig>,
-    condvar: Arc<Condvar>,
+    config: ConnectionPoolConfig,
+    condvar: Condvar,
 }
 
 /// Returns a new `Pool` referencing the same state as `self`.
-impl<T> Clone for ConnectionPool<T>
+/*impl<T> Clone for ConnectionPool<T>
     where
         T: ConnectionFactory,
 {
@@ -106,12 +106,12 @@ impl<T> Clone for ConnectionPool<T>
             condvar: self.condvar.clone(),
         }
     }
-}
+}*/
 
-fn create_initial_connections<T: ConnectionFactory>(status : &Arc<Mutex<ConnectionPoolStatus>>,
-                                                    pool_config: &Arc<ConnectionPoolConfig>,
-                                                    conn_num: &Arc<AtomicU16>,
-                                                    bag : &Arc<ConcurrentBag<T::Connection>>,
+fn create_initial_connections<T: ConnectionFactory>(status : &Mutex<ConnectionPoolStatus>,
+                                                    pool_config: &ConnectionPoolConfig,
+                                                    conn_num: &AtomicU16,
+                                                    bag : &ConcurrentBag<T::Connection>,
                                                     connection_factory: &Arc<T>)->Result<(),HkcpError> {
     let lock_result = status.lock();
 /*    if lock_result.is_err() {
@@ -128,10 +128,10 @@ fn create_initial_connections<T: ConnectionFactory>(status : &Arc<Mutex<Connecti
     return Ok(());
 }
 
-fn create_connection<T: ConnectionFactory>(config: &Arc<ConnectionPoolConfig>,
+fn create_connection<T: ConnectionFactory>(config: &ConnectionPoolConfig,
                                            status : &mut ConnectionPoolStatus,
-                                           conn_num: &Arc<AtomicU16>,
-                                           bag : &Arc<ConcurrentBag<T::Connection>>,
+                                           conn_num: &AtomicU16,
+                                           bag : &ConcurrentBag<T::Connection>,
                                            connection_factory: &Arc<T>)->Result<(),HkcpError> {
     let connection_factory_in_thread = connection_factory.clone();
     let (tx, rx) = unbounded();
@@ -161,20 +161,20 @@ fn create_connection<T: ConnectionFactory>(config: &Arc<ConnectionPoolConfig>,
     }
 }
 
-impl<T: ConnectionFactory> ConnectionPool<T> {
+impl<T: ConnectionFactory> InternalPool<T> {
 
     pub fn new_with_config(
         connection_factory: T,
         pool_config: ConnectionPoolConfig,
-    ) -> Result<ConnectionPool<T>,HkcpError> {
-        let initial_status =Arc::new(Mutex::new(ConnectionPoolStatus {
+    ) -> Result<InternalPool<T>,HkcpError> {
+        let initial_status =Mutex::new(ConnectionPoolStatus {
             current_connections_num: 0,
-        }));
+        });
         let max_conn=pool_config.max_connections;
-        let initial_config=Arc::new(pool_config);
-        let initial_bag = Arc::new(ConcurrentBag::new(max_conn));
+        let initial_config=pool_config;
+        let initial_bag = ConcurrentBag::new(max_conn);
         let initial_connection_factory= Arc::new(connection_factory);
-        let initial_available_entries= Arc::new(AtomicU16::new(0));
+        let initial_available_entries= AtomicU16::new(0);
         let create_result=create_initial_connections(&initial_status,
                                                      &initial_config, &initial_available_entries,
                                                      &initial_bag,
@@ -182,13 +182,13 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
 
         match create_result {
             Ok(_) => {
-                Ok(ConnectionPool {
+                Ok(InternalPool {
                     bag: initial_bag,
                     status: initial_status,
                     available_entries: initial_available_entries,
                     connection_factory: initial_connection_factory,
                     config: initial_config,
-                    condvar: Arc::new(Condvar::new()),
+                    condvar: Condvar::new(),
                 })
             }
             Err(error) => {
@@ -197,8 +197,8 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
         }
     }
 
-    pub fn new(connection_factory: T) -> Result<ConnectionPool<T>,HkcpError> {
-        ConnectionPool::new_with_config(connection_factory, ConnectionPoolConfig {
+    pub fn new(connection_factory: T) -> Result<InternalPool<T>,HkcpError> {
+        InternalPool::new_with_config(connection_factory, ConnectionPoolConfig {
             initial_connections: 1,
             max_connections: 2,
             connect_timeout_millis: 500,
@@ -213,12 +213,12 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
         self.condvar.notify_one();
     }
 
-    pub fn get_connection(&self) -> Result<PooledConnection<T>, HkcpError> {
+    pub fn get_connection(&self) -> Result<T::Connection, HkcpError> {
         let opt_entry = self.bag.borrow_entry();
         if opt_entry.is_some() {
             let conn=opt_entry.unwrap();
             return if self.connection_factory.is_valid(&conn) {
-                Ok(PooledConnection::new(self.clone(), conn))
+                Ok(conn)
             } else {
                 println!("fail to get a connection try lock");
                 let lock_result = self.status.lock();
@@ -234,7 +234,7 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
         let create_result = self.get_connection_internal();
         match create_result {
             Ok(bag_entry) => {
-                Ok(PooledConnection::new(self.clone(), bag_entry))
+                Ok(bag_entry)
             }
             Err(err) => {
                 Err(err)
@@ -304,6 +304,70 @@ impl<T: ConnectionFactory> ConnectionPool<T> {
                 }
             //}
         }
+    }
+}
+
+
+
+pub struct ConnectionPool<T>(Arc<InternalPool<T>>)
+    where
+        T: ConnectionFactory;
+
+impl<T> Clone for ConnectionPool<T>
+    where
+        T: ConnectionFactory,
+{
+    fn clone(&self) -> ConnectionPool<T> {
+        ConnectionPool(self.0.clone())
+    }
+}
+impl<T: ConnectionFactory> ConnectionPool<T> {
+    pub fn new_with_config(
+        connection_factory: T,
+        pool_config: ConnectionPoolConfig,
+    ) -> Result<ConnectionPool<T>,HkcpError> {
+        let internal_result=InternalPool::new_with_config(connection_factory, pool_config);
+        match internal_result {
+            Ok(internal_pool) => {
+                Ok(ConnectionPool(Arc::new(internal_pool)))
+            }
+            Err(error) => {
+                Err(error)
+            }
+        }
+
+    }
+
+    pub fn new(
+        connection_factory: T
+    ) -> Result<ConnectionPool<T>,HkcpError> {
+        let internal_result=InternalPool::new(connection_factory);
+        match internal_result {
+            Ok(internal_pool) => {
+                Ok(ConnectionPool(Arc::new(internal_pool)))
+            }
+            Err(error) => {
+                Err(error)
+            }
+        }
+
+    }
+
+
+    pub fn get_connection(&self) -> Result<PooledConnection<T>, HkcpError> {
+        let get_result=self.0.get_connection();
+        match get_result {
+            Ok(connection) => {
+                Ok(PooledConnection::new(self.clone(),connection))
+            }
+            Err(error) => {
+                Err(error)
+            }
+        }
+    }
+
+    pub fn release_connection(&self, entry: T::Connection) {
+        self.0.release_connection(entry);
     }
 }
 

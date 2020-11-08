@@ -24,19 +24,19 @@ fn main() {
     let mut handle_vec = vec![];
     let start = Instant::now();
 
-    for _ in 0..20 {
+    for _ in 0..10 {
         let pool_for_thread = Arc::clone(&shared_pool);
         let ok_for_thread = Arc::clone(&ok_shared);
         let ko_for_thread = Arc::clone(&ko_shared);
         let handle = thread::spawn(move || {
-            let mut rng = thread_rng();
+            //let mut rng = thread_rng();
             //let randomvalue = 25;//rng.gen_range(20, 30);
             //let ten_millis = time::Duration::from_millis(randomvalue);
             //thread::sleep(ten_millis);
             let opt_str =pool_for_thread.get_connection().ok();
             if opt_str.is_some() {
                 let str = opt_str.unwrap();
-                let mut rng = thread_rng();
+                //let mut rng = thread_rng();
                 //let randomvalue = 5;//rng.gen_range(0, 5);
                 //let ten_millis = time::Duration::from_millis(randomvalue);
                 //thread::sleep(ten_millis);
