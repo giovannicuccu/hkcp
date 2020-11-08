@@ -15,3 +15,6 @@ rand = "0.7.3"
 
 [dev-dependencies]
 r2d2 = "0.8.8"
+
+[profile.release]
+debug = true

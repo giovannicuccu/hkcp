@@ -108,22 +108,22 @@ fn test_multithread() {
     let mut handle_vec = vec![];
     let start = Instant::now();
 
-    for _ in 0..100 {
+    for _ in 0..10 {
         let pool_for_thread = Arc::clone(&shared_pool);
         let ok_for_thread = Arc::clone(&ok_shared);
         let ko_for_thread = Arc::clone(&ko_shared);
         let handle = thread::spawn(move || {
             let mut rng = thread_rng();
-            let randomvalue = 20;//rng.gen_range(20, 30);
-            let ten_millis = time::Duration::from_millis(randomvalue);
-            thread::sleep(ten_millis);
+            //let randomvalue = 20;//rng.gen_range(20, 30);
+            //let ten_millis = time::Duration::from_millis(randomvalue);
+            //thread::sleep(ten_millis);
             let opt_str =pool_for_thread.get_connection().ok();
             if opt_str.is_some() {
                 let mut str = opt_str.unwrap();
                 let mut rng = thread_rng();
-                let randomvalue = 5;//rng.gen_range(0, 5);
-                let ten_millis = time::Duration::from_millis(randomvalue);
-                thread::sleep(ten_millis);
+                //let randomvalue = 5;//rng.gen_range(0, 5);
+                //let ten_millis = time::Duration::from_millis(randomvalue);
+                //thread::sleep(ten_millis);
                 ok_for_thread.fetch_add(1, Ordering::SeqCst);
             } else {
                 ko_for_thread.fetch_add(1, Ordering::SeqCst);
@@ -174,22 +174,22 @@ fn test_multithread_r2d2() {
     let mut handle_vec = vec![];
     let start = Instant::now();
 
-    for _ in 0..100 {
+    for _ in 0..10 {
         let pool_for_thread = Arc::clone(&shared_pool);
         let ok_for_thread = Arc::clone(&ok_shared);
         let ko_for_thread = Arc::clone(&ko_shared);
         let handle = thread::spawn(move || {
             let mut rng = thread_rng();
-            let randomvalue = 25;//rng.gen_range(20, 30);
-            let ten_millis = time::Duration::from_millis(randomvalue);
-            thread::sleep(ten_millis);
+            //let randomvalue = 25;//rng.gen_range(20, 30);
+            //let ten_millis = time::Duration::from_millis(randomvalue);
+            //thread::sleep(ten_millis);
             let opt_str =pool_for_thread.get().ok();
             if opt_str.is_some() {
                 let str = opt_str.unwrap();
                 let mut rng = thread_rng();
-                let randomvalue = 5;//rng.gen_range(0, 5);
-                let ten_millis = time::Duration::from_millis(randomvalue);
-                thread::sleep(ten_millis);
+                //let randomvalue = 5;//rng.gen_range(0, 5);
+                //let ten_millis = time::Duration::from_millis(randomvalue);
+                //thread::sleep(ten_millis);
                 ok_for_thread.fetch_add(1, Ordering::SeqCst);
             } else {
                 ko_for_thread.fetch_add(1, Ordering::SeqCst);
