@@ -1,7 +1,5 @@
 use parking_lot::{Mutex};
-use rand::prelude::*;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct ConcurrentBag<T> {
     protected_list_1: Mutex<Vec<T>>,
@@ -9,58 +7,27 @@ pub struct ConcurrentBag<T> {
     available_entries_1: AtomicU16,
     available_entries_2: AtomicU16,
     sequence_gen: AtomicU16,
-    //mutex_for_wait: Mutex<bool>,
-    //condition_for_wait: Condvar,
+    sequence_gen_release: AtomicU16,
 }
 
 impl<'a, T> ConcurrentBag<T> {
-    pub fn new(initial_size: u16) -> ConcurrentBag<T> {
+    pub fn new() -> ConcurrentBag<T> {
         ConcurrentBag {
             protected_list_1: Mutex::new(vec![]),
             protected_list_2: Mutex::new(vec![]),
             available_entries_1: AtomicU16::new(0),
             available_entries_2: AtomicU16::new(0),
             sequence_gen: AtomicU16::new(0),
-            //mutex_for_wait: Mutex::new(false),
-            //condition_for_wait: Condvar::new(),
+            sequence_gen_release: AtomicU16::new(0),
         }
-    }
-
-
-/*    pub fn borrow_entry_std(&self) -> Option<T> {
-        for mutex in &self.entry_list {
-            let opt_lock = mutex.try_lock();
-            if opt_lock.is_some() {
-                let mut opt = opt_lock.unwrap();
-                if opt.is_some() {
-                    &self.available_entries.fetch_sub(1, Ordering::SeqCst);
-                    return opt.take();
-                }
-            }
-        }
-        None
-    }*/
-
-    fn my_random(&self) ->u16 {
-        //let mut rng = thread_rng();
-        //rng.gen_range(1, 3) as u16
-        let in_ms=self.sequence_gen.fetch_add(1,Ordering::Relaxed);
-        (in_ms%2)+1
-
-        /*let start = SystemTime::now();
-        let since_the_epoch = start
-            .duration_since(UNIX_EPOCH);
-        let in_ms = since_the_epoch.ok().unwrap().as_millis();
-        (in_ms as u16%2)+1*/
     }
 
     pub fn borrow_entry(&self) -> Option<T> {
         if (self.available_entries_1.load(Ordering::SeqCst)==0) && (self.available_entries_2.load(Ordering::SeqCst)==0) {
             return None;
         }
-        //let in_ms=self.available_entries.fetch_add(1,Ordering::SeqCst);
-        //let randomvalue=(in_ms as u16%2)+1;
-        let randomvalue=self.my_random();
+        let in_ms=self.sequence_gen.fetch_add(1,Ordering::Relaxed);
+        let randomvalue=(in_ms%2)+1;
         //let randomvalue=1;
         return if randomvalue == 1 {
             let mut list_1 = self.protected_list_1.lock();
@@ -97,10 +64,8 @@ impl<'a, T> ConcurrentBag<T> {
 
 
     pub fn release_entry(&self, entry: T) {
-        //let in_ms=self.available_entries.fetch_add(1,Ordering::SeqCst);
-        //let randomvalue=(in_ms as u16%2)+1;
-        let randomvalue=self.my_random();
-        //let randomvalue=1;
+        let in_ms=self.sequence_gen_release.fetch_add(1,Ordering::Relaxed);
+        let randomvalue=(in_ms%2)+1;
         if randomvalue == 1 {
             let mut list_1=self.protected_list_1.lock();
             list_1.push(entry);
@@ -120,10 +85,6 @@ impl<'a, T> ConcurrentBag<T> {
         let size=size+list_2.len();
         size
     }
-
-    pub fn available_size(&self) -> u16 {
-        self.size() as u16
-    }
 }
 
 #[cfg(test)]
@@ -137,36 +98,30 @@ mod tests {
 
     #[test]
     fn add_entry() {
-        let simple_bag: ConcurrentBag<String> = ConcurrentBag::new(10);
+        let simple_bag: ConcurrentBag<String> = ConcurrentBag::new();
         simple_bag.release_entry(String::from("hello Rust"));
         assert_eq!(simple_bag.size(), 1);
-        assert_eq!(simple_bag.available_size(), 1);
         simple_bag.release_entry(String::from("hello Rust 2"));
         assert_eq!(simple_bag.size(), 2);
-        assert_eq!(simple_bag.available_size(), 2);
     }
 
     #[test]
     fn borrow_entry() {
-        let simple_bag: ConcurrentBag<String> = ConcurrentBag::new(10);
+        let simple_bag: ConcurrentBag<String> = ConcurrentBag::new();
         simple_bag.release_entry(String::from("hello Rust"));
         assert_eq!(simple_bag.size(), 1);
-        assert_eq!(simple_bag.available_size(), 1);
         let str = simple_bag.borrow_entry().unwrap();
         assert_eq!(simple_bag.size(), 0);
-        assert_eq!(simple_bag.available_size(), 0);
         assert_eq!(str, String::from("hello Rust"));
     }
 
     #[test]
     fn borrow_entry_mut() {
-        let simple_bag: ConcurrentBag<String> = ConcurrentBag::new(10);
+        let simple_bag: ConcurrentBag<String> = ConcurrentBag::new();
         simple_bag.release_entry(String::from("hello Rust"));
         assert_eq!(simple_bag.size(), 1);
-        assert_eq!(simple_bag.available_size(), 1);
         let mut str = simple_bag.borrow_entry().unwrap();
         assert_eq!(simple_bag.size(), 0);
-        assert_eq!(simple_bag.available_size(), 0);
         assert_eq!(str, String::from("hello Rust"));
         str.insert_str(0, "hello,");
         assert_eq!(str, String::from("hello,hello Rust"));

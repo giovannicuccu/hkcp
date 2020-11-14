@@ -4,7 +4,6 @@ use std::{thread, time};
 use std::time::{Duration, Instant};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
-use rand::{thread_rng, Rng};
 
 mod common;
 
@@ -108,7 +107,7 @@ fn test_multithread() {
     let mut handle_vec = vec![];
     let start = Instant::now();
 
-    for _ in 0..10 {
+    for _ in 0..20 {
         let pool_for_thread = Arc::clone(&shared_pool);
         let ok_for_thread = Arc::clone(&ok_shared);
         let ko_for_thread = Arc::clone(&ko_shared);
@@ -153,7 +152,7 @@ fn test_multithread_r2d2() {
     let mut handle_vec = vec![];
     let start = Instant::now();
 
-    for _ in 0..10 {
+    for _ in 0..20 {
         let pool_for_thread = Arc::clone(&shared_pool);
         let ok_for_thread = Arc::clone(&ok_shared);
         let ko_for_thread = Arc::clone(&ko_shared);

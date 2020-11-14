@@ -3,12 +3,10 @@ use std::sync::{Arc};
 use std::{fmt, error, thread};
 use std::time::Duration;
 use crossbeam_channel::unbounded;
-use crate::concurrent_bag::SimpleBag;
 use parking_lot::{Condvar, Mutex};
 use std::sync::atomic::{AtomicU16, Ordering};
 use crate::concurrent_bag_list::ConcurrentBag;
 
-mod concurrent_bag;
 mod concurrent_bag_list;
 
 #[cfg(test)]
@@ -91,23 +89,6 @@ pub struct InternalPool<T>
     condvar: Condvar,
 }
 
-/// Returns a new `Pool` referencing the same state as `self`.
-/*impl<T> Clone for ConnectionPool<T>
-    where
-        T: ConnectionFactory,
-{
-    fn clone(&self) -> ConnectionPool<T> {
-        ConnectionPool {
-            bag: self.bag.clone(),
-            status: self.status.clone(),
-            available_entries: self.available_entries.clone(),
-            connection_factory: self.connection_factory.clone(),
-            config: self.config.clone(),
-            condvar: self.condvar.clone(),
-        }
-    }
-}*/
-
 fn create_initial_connections<T: ConnectionFactory>(status : &Mutex<ConnectionPoolStatus>,
                                                     pool_config: &ConnectionPoolConfig,
                                                     conn_num: &AtomicU16,
@@ -172,7 +153,7 @@ impl<T: ConnectionFactory> InternalPool<T> {
         });
         let max_conn=pool_config.max_connections;
         let initial_config=pool_config;
-        let initial_bag = ConcurrentBag::new(max_conn);
+        let initial_bag = ConcurrentBag::new();
         let initial_connection_factory= Arc::new(connection_factory);
         let initial_available_entries= AtomicU16::new(0);
         let create_result=create_initial_connections(&initial_status,
