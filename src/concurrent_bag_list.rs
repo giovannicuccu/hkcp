@@ -29,7 +29,7 @@ impl<'a, T> ConcurrentBag<T> {
         let in_ms=self.sequence_gen.fetch_add(1,Ordering::Relaxed);
         let randomvalue=(in_ms%2)+1;
         //let randomvalue=1;
-        return if randomvalue == 1 {
+        if randomvalue == 1 {
             let mut list_1 = self.protected_list_1.lock();
             let opt_from_list_1 = list_1.pop();
             if opt_from_list_1.is_some() {
@@ -80,20 +80,14 @@ impl<'a, T> ConcurrentBag<T> {
 
     pub fn size(&self) -> usize {
         let list_1=self.protected_list_1.lock();
-        let size=list_1.len();
-        let list_2=self.protected_list_2.lock();
-        let size=size+list_2.len();
-        size
+        let size = list_1.len();
+        let list_2 = self.protected_list_2.lock();
+        size + list_2.len()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use rand::{thread_rng, Rng};
-    use std::sync::atomic::{AtomicU16, Ordering};
-    use std::sync::Arc;
-    use std::time::Instant;
-    use std::{thread, time};
     use crate::concurrent_bag_list::ConcurrentBag;
 
     #[test]

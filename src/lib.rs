@@ -99,14 +99,11 @@ fn create_initial_connections<T: ConnectionFactory>(status : &Mutex<ConnectionPo
         return Err(HkcpError { message: String::from("Internal Error while locking status") });
     }*/
     let mut status_lock = lock_result;
-    for _ in 1..pool_config.initial_connections+1 {
-        let create_result = create_connection(pool_config,&mut status_lock, conn_num,bag,
-                                              connection_factory);
-        if create_result.is_err() {
-            return Err(create_result.err().unwrap());
-        }
+    for _ in 0..pool_config.initial_connections {
+        create_connection(pool_config, &mut status_lock, conn_num, bag,
+                                              connection_factory)?;
     }
-    return Ok(());
+    Ok(())
 }
 
 fn create_connection<T: ConnectionFactory>(config: &ConnectionPoolConfig,
@@ -121,12 +118,11 @@ fn create_connection<T: ConnectionFactory>(config: &ConnectionPoolConfig,
         tx.send(conn_res)
     });
     let thread_result = rx.recv_timeout(Duration::from_millis(config.connect_timeout_millis as u64));
-    return match thread_result {
+    match thread_result {
         Ok(conn_res) => {
             match conn_res {
                 Ok(conn) => {
-                    status.current_connections_num =
-                        status.current_connections_num + 1;
+                    status.current_connections_num += 1;
                     conn_num.fetch_add(1, Ordering::SeqCst);
                     bag.release_entry(conn);
                     Ok(())
@@ -151,7 +147,6 @@ impl<T: ConnectionFactory> InternalPool<T> {
         let initial_status =Mutex::new(ConnectionPoolStatus {
             current_connections_num: 0,
         });
-        let max_conn=pool_config.max_connections;
         let initial_config=pool_config;
         let initial_bag = ConcurrentBag::new();
         let initial_connection_factory= Arc::new(connection_factory);
@@ -196,8 +191,7 @@ impl<T: ConnectionFactory> InternalPool<T> {
 
     pub fn get_connection(&self) -> Result<T::Connection, HkcpError> {
         let opt_entry = self.bag.borrow_entry();
-        if opt_entry.is_some() {
-            let conn=opt_entry.unwrap();
+        if let Some(conn) = opt_entry {
             return if self.connection_factory.is_valid(&conn) {
                 Ok(conn)
             } else {
@@ -207,7 +201,7 @@ impl<T: ConnectionFactory> InternalPool<T> {
                     return Err(HkcpError { message: String::from("Internal Error while locking status") });
                 }*/
                 let mut status_lock = lock_result;
-                status_lock.current_connections_num=status_lock.current_connections_num-1;
+                status_lock.current_connections_num -= 1;
                 self.get_connection()
             }
         }
@@ -239,17 +233,14 @@ impl<T: ConnectionFactory> InternalPool<T> {
                                                   &self.connection_factory);
             match create_result {
                 Ok(()) => {
-                    status_lock.current_connections_num =
-                        status_lock.current_connections_num + 1;
+                    status_lock.current_connections_num += 1;
                     let opt_entry = self.bag.borrow_entry();
-                    if opt_entry.is_some() {
-                        return Ok(opt_entry.unwrap());
+                    match opt_entry {
+                        Some(opt_entry) => Ok(opt_entry),
+                        None => Err(HkcpError { message: String::from("Internal Error while getting entry from bag") }),
                     }
-                    return Err(HkcpError { message: String::from("Internal Error while getting entry from bag") });
                 }
-                Err(error) => {
-                    return Err(HkcpError { message: error.to_string() });
-                }
+                Err(error) => Err(HkcpError { message: error.to_string() }),
             }
         } else {
             //loop {
@@ -260,28 +251,26 @@ impl<T: ConnectionFactory> InternalPool<T> {
                     );
                 //status_lock = result.0;
                 if result.timed_out() {
-                    return Err(HkcpError {
-                        message: String::from("No available connection in pool"),
-                    });
+                    Err(HkcpError { message: String::from("No available connection in pool"),
+                    })
                 } else {
                     let opt_entry = self.bag.borrow_entry();
-                    if opt_entry.is_some() {
-                        let conn=opt_entry.unwrap();
-                        return if self.connection_factory.is_valid(&conn) {
-                            Ok(conn)
-                        } else {
-                            let lock_result = self.status.lock();
-/*                            if lock_result.is_err() {
-                                return Err(HkcpError { message: String::from("Internal Error while locking status") });
-                            }*/
-                            let mut status_lock = lock_result;
-                            status_lock.current_connections_num=status_lock.current_connections_num-1;
-                            self.get_connection_internal()
-                        }
+                    match opt_entry {
+                        Some(conn) => {
+                            if self.connection_factory.is_valid(&conn) {
+                                Ok(conn)
+                            } else {
+                                let lock_result = self.status.lock();
+    /*                            if lock_result.is_err() {
+                                    return Err(HkcpError { message: String::from("Internal Error while locking status") });
+                                }*/
+                                let mut status_lock = lock_result;
+                                status_lock.current_connections_num -= 1;
+                                self.get_connection_internal()
+                            }
+                        },
+                        None => Err(HkcpError { message: String::from("No available connection in pool"), }),
                     }
-                    return Err(HkcpError {
-                        message: String::from("No available connection in pool"),
-                    });
                 }
             //}
         }
